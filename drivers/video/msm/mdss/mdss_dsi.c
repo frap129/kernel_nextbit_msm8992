@@ -29,6 +29,10 @@
 #include "mdss_dsi.h"
 #include "mdss_debug.h"
 
+/*FIH, Hubert, 20151127, use lcm regs (DBh) to work with TP FW upgrade {*/
+extern ssize_t panel_print_status2(struct mdss_dsi_ctrl_pdata *ctrl_pdata);
+/*} FIH, Hubert, 20151127, use lcm regs (DBh) to work with TP FW upgrade*/
+
 #define XO_CLK_RATE	19200000
 
 static struct dsi_drv_cm_data shared_ctrl_data;
@@ -893,6 +897,10 @@ static int mdss_dsi_unblank(struct mdss_panel_data *pdata)
 		if (mdss_dsi_is_te_based_esd(ctrl_pdata))
 			enable_irq(gpio_to_irq(ctrl_pdata->disp_te_gpio));
 	}
+
+// FIH, Hubert, 20151127, use lcm regs (DBh) to work with TP FW upgrade {
+	panel_print_status2(ctrl_pdata);
+//} FIH, Hubert, 20151127, use lcm regs (DBh) to work with TP FW upgrade
 
 error:
 	mdss_dsi_clk_ctrl(ctrl_pdata, DSI_ALL_CLKS, 0);
