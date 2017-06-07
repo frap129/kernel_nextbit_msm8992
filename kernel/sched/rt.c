@@ -5,6 +5,7 @@
 
 #include "sched.h"
 
+#include <linux/interrupt.h>
 #include <linux/slab.h>
 #include <trace/events/sched.h>
 
@@ -1284,6 +1285,23 @@ static void yield_task_rt(struct rq *rq)
 #ifdef CONFIG_SMP
 static int find_lowest_rq(struct task_struct *task);
 
+/*
+ * Return whether the task on the given cpu is currently non-preemptible
+ * while handling a potentially long softint, or if the task is likely
+ * to block preemptions soon because it is a ksoftirq thread that is
+ * handling slow softints.
+ */
+bool
+task_may_not_preempt(struct task_struct *task, int cpu)
+{
+	__u32 softirqs = per_cpu(active_softirqs, cpu) |
+			 __IRQ_STAT(cpu, __softirq_pending);
+	struct task_struct *cpu_ksoftirqd = per_cpu(ksoftirqd, cpu);
+	return ((softirqs & LONG_SOFTIRQ_MASK) &&
+		(task == cpu_ksoftirqd ||
+		 task_thread_info(task)->preempt_count & SOFTIRQ_MASK));
+}
+
 static int
 select_task_rq_rt_hmp(struct task_struct *p, int sd_flag, int flags)
 {
@@ -1306,6 +1324,7 @@ select_task_rq_rt(struct task_struct *p, int sd_flag, int flags)
 	struct task_struct *curr;
 	struct rq *rq;
 	int cpu;
+	bool may_not_preempt;
 
 	cpu = task_cpu(p);
 
@@ -1325,7 +1344,12 @@ select_task_rq_rt(struct task_struct *p, int sd_flag, int flags)
 	curr = ACCESS_ONCE(rq->curr); /* unlocked access */
 
 	/*
-	 * If the current task on @p's runqueue is an RT task, then
+	 * If the current task on @p's runqueue is a softirq task,
+	 * it may run without preemption for a time that is
+	 * ill-suited for a waiting RT task. Therefore, try to
+	 * wake this RT task on another runqueue.
+	 *
+	 * Also, if the current task on @p's runqueue is an RT task, then
 	 * try to see if we can wake this RT task up on another
 	 * runqueue. Otherwise simply start this RT task
 	 * on its current runqueue.
@@ -1346,13 +1370,21 @@ select_task_rq_rt(struct task_struct *p, int sd_flag, int flags)
 	 * This test is optimistic, if we get it wrong the load-balancer
 	 * will have to sort it out.
 	 */
-	if (curr && unlikely(rt_task(curr)) &&
-	    (curr->nr_cpus_allowed < 2 ||
-	     curr->prio <= p->prio) &&
-	    (p->nr_cpus_allowed > 1)) {
+	may_not_preempt = task_may_not_preempt(curr, cpu);
+	if (curr && (may_not_preempt ||
+		     (unlikely(rt_task(curr)) &&
+		      (curr->nr_cpus_allowed < 2 ||
+		       curr->prio <= p->prio)))) {
 		int target = find_lowest_rq(p);
-
-		if (target != -1)
+ 		/*
+		 * If cpu is non-preemptible, prefer remote cpu
+		 * even if it's running a higher-prio task.
+ 		 * Otherwise: Possible race. Don't bother moving it if the
+		 * destination CPU is not running a lower priority task.
+ 		 */
+		if (target != -1 &&
+		    (may_not_preempt ||
+		     p->prio < cpu_rq(target)->rt.highest_prio.curr))
 			cpu = target;
 	}
 	rcu_read_unlock();
@@ -1454,10 +1486,10 @@ static struct task_struct *_pick_next_task_rt(struct rq *rq)
 	 * put_prev_task. A stale value can cause us to over-charge execution
 	 * time to real-time task, that could trigger throttling unnecessarily
 	 */
-	if (rq->skip_clock_update > 0) {
+	if (rq->skip_clock_update > 0)
 		rq->skip_clock_update = 0;
-		update_rq_clock(rq);
-	}
+
+	update_rq_clock(rq);
 	p = rt_task_of(rt_se);
 	p->se.exec_start = rq->clock_task;
 
@@ -1553,6 +1585,7 @@ static int find_lowest_rq_hmp(struct task_struct *task)
 {
 	struct cpumask *lowest_mask = __get_cpu_var(local_cpu_mask);
 	int cpu_cost, min_cost = INT_MAX;
+	u64 cpu_load, min_load = ULLONG_MAX;
 	int best_cpu = -1;
 	int i;
 
@@ -1579,18 +1612,34 @@ static int find_lowest_rq_hmp(struct task_struct *task)
 	 */
 	for_each_cpu(i, lowest_mask) {
 		struct rq *rq = cpu_rq(i);
-		cpu_cost = power_cost_at_freq(i, ACCESS_ONCE(rq->min_freq));
+		cpu_cost = power_cost_at_freq(i,
+				ACCESS_ONCE(rq->cluster->min_freq));
 		trace_sched_cpu_load(rq, idle_cpu(i), mostly_idle_cpu(i),
 				     sched_irqload(i), cpu_cost, cpu_temp(i));
 
-		if (sched_boost() && capacity(rq) != max_capacity)
+		if (sched_boost() && cpu_capacity(i) != max_capacity)
 			continue;
 
-		if (cpu_cost < min_cost && !sched_cpu_high_irqload(i)) {
+		if (power_delta_exceeded(cpu_cost, min_cost)) {
+			if (cpu_cost > min_cost)
+				continue;
+
 			min_cost = cpu_cost;
+			min_load = ULLONG_MAX;
+			best_cpu = -1;
+		}
+
+		if (sched_cpu_high_irqload(i))
+			continue;
+
+		cpu_load = scale_load_to_cpu(
+				rq->hmp_stats.cumulative_runnable_avg, i);
+		if (cpu_load < min_load) {
+			min_load = cpu_load;
 			best_cpu = i;
 		}
 	}
+
 	return best_cpu;
 }
 

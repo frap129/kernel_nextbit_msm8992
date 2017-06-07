@@ -1968,6 +1968,10 @@ extern int
 sched_set_cpu_mostly_idle_freq(int cpu, unsigned int mostly_idle_freq);
 extern unsigned int sched_get_cpu_mostly_idle_freq(int cpu);
 
+// TheCrazyLex@PA Introduce Shadow scheduling extension - start
+void sched_set_shadow_active(bool active);
+// TheCrazyLex@PA Introduce Shadow scheduling extension - end
+
 #else
 static inline int sched_set_boost(int enable)
 {
@@ -2014,6 +2018,7 @@ extern u64 cpu_clock(int cpu);
 extern u64 local_clock(void);
 extern u64 sched_clock_cpu(int cpu);
 
+extern u64 sched_ktime_clock(void);
 
 extern void sched_clock_init(void);
 extern int sched_clock_initialized(void);

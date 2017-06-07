@@ -18,6 +18,9 @@
  *
  *  Adaptive scheduling granularity, math enhancements by Peter Zijlstra
  *  Copyright (C) 2007 Red Hat, Inc., Peter Zijlstra <pzijlstr@redhat.com>
+ *
+ *  Copyright (C) 2017 Paranoid Android for Nextbit Systems Inc.
+ *
  */
 
 #include <linux/latencytop.h>
@@ -1333,16 +1336,30 @@ unsigned int __read_mostly sched_heavy_task;
  * considered for "up" migration, i.e migrating to a cpu with better
  * capacity.
  */
-unsigned int __read_mostly sched_upmigrate;
-unsigned int __read_mostly sysctl_sched_upmigrate_pct = 80;
+unsigned int sched_upmigrate;
+unsigned int sysctl_sched_upmigrate_pct = 80;
 
 /*
  * Big tasks, once migrated, will need to drop their bandwidth
  * consumption to less than sched_downmigrate before they are "down"
  * migrated.
  */
-unsigned int __read_mostly sched_downmigrate;
-unsigned int __read_mostly sysctl_sched_downmigrate_pct = 60;
+unsigned int sched_downmigrate;
+unsigned int sysctl_sched_downmigrate_pct = 60;
+
+// TheCrazyLex@PA Introduce Shadow scheduling extension - start
+/* Shadow scheduling extension */
+bool __read_mostly sched_use_shadow_scheduling;
+int __read_mostly sysctl_sched_use_shadow_scheduling;
+
+unsigned int __read_mostly sched_shadow_upmigrate;
+unsigned int __read_mostly sysctl_sched_shadow_upmigrate_pct = 50;
+
+unsigned int __read_mostly sched_shadow_downmigrate;
+unsigned int __read_mostly sysctl_sched_shadow_downmigrate_pct = 30;
+
+bool sched_shadow_active;
+// TheCrazyLex@PA Introduce Shadow scheduling extension - end
 
 /*
  * Tasks whose nice value is > sysctl_sched_upmigrate_min_nice are never
@@ -1359,13 +1376,6 @@ int __read_mostly sysctl_sched_upmigrate_min_nice = 15;
  */
 unsigned int sysctl_sched_boost;
 
-static inline int available_cpu_capacity(int cpu)
-{
-	struct rq *rq = cpu_rq(cpu);
-
-	return rq->capacity;
-}
-
 void set_hmp_defaults(void)
 {
 	sched_spill_load =
@@ -1379,6 +1389,14 @@ void set_hmp_defaults(void)
 
 	sched_downmigrate =
 		pct_to_real(sysctl_sched_downmigrate_pct);
+
+	// TheCrazyLex@PA Introduce Shadow scheduling extension - start
+	sched_shadow_upmigrate =
+		pct_to_real(sysctl_sched_shadow_upmigrate_pct);
+
+	sched_shadow_downmigrate =
+		pct_to_real(sysctl_sched_shadow_downmigrate_pct);
+	// TheCrazyLex@PA Introduce Shadow scheduling extension - end
 
 #ifdef CONFIG_SCHED_FREQ_INPUT
 	sched_heavy_task =
@@ -1443,10 +1461,10 @@ int sched_set_cpu_mostly_idle_freq(int cpu, unsigned int mostly_idle_freq)
 {
 	struct rq *rq = cpu_rq(cpu);
 
-	if (mostly_idle_freq > rq->max_possible_freq)
+	if (mostly_idle_freq > cpu_max_possible_freq(cpu))
 		return -EINVAL;
 
-	rq->mostly_idle_freq = mostly_idle_freq;
+	rq->cluster->mostly_idle_freq = mostly_idle_freq;
 
 	return 0;
 }
@@ -1455,7 +1473,7 @@ unsigned int sched_get_cpu_mostly_idle_freq(int cpu)
 {
 	struct rq *rq = cpu_rq(cpu);
 
-	return rq->mostly_idle_freq;
+	return rq->cluster->mostly_idle_freq;
 }
 
 int sched_get_cpu_mostly_idle_load(int cpu)
@@ -1500,6 +1518,24 @@ static inline int upmigrate_discouraged(struct task_struct *p)
 
 #endif
 
+// TheCrazyLex@PA Introduce Shadow scheduling extension - start
+static __always_inline int get_shadow_based_sched_upmigrate(void)
+{
+	if (sched_shadow_active)
+		return sched_shadow_upmigrate;
+	else
+		return sched_upmigrate;
+}
+
+static __always_inline int get_shadow_based_sched_downmigrate(void)
+{
+	if (sched_shadow_active)
+		return sched_shadow_downmigrate;
+	else
+		return sched_downmigrate;
+}
+// TheCrazyLex@PA Introduce Shadow scheduling extension - end
+
 /* Is a task "big" on its current cpu */
 static inline int is_big_task(struct task_struct *p)
 {
@@ -1511,7 +1547,7 @@ static inline int is_big_task(struct task_struct *p)
 
 	load = scale_load_to_cpu(load, task_cpu(p));
 
-	return load > sched_upmigrate;
+	return load > get_shadow_based_sched_upmigrate();
 }
 
 /* Is a task "small" on the minimum capacity CPU */
@@ -1600,7 +1636,7 @@ static void boost_kick_cpus(void)
 	int i;
 
 	for_each_online_cpu(i) {
-		if (cpu_rq(i)->capacity != max_capacity)
+		if (cpu_capacity(i) != max_capacity)
 			boost_kick(i);
 	}
 }
@@ -1643,6 +1679,20 @@ int sched_set_boost(int enable)
 	return ret;
 }
 
+// TheCrazyLex@PA Introduce Shadow scheduling extension - start
+void sched_set_shadow_active(bool active)
+{
+	if (sched_shadow_active != active && sched_use_shadow_scheduling) {
+		/* Force scheduler to reclassify the tasks because the sched_shadow_active state changed */
+		get_online_cpus();
+		pre_big_small_task_count_change(cpu_online_mask);
+		sched_shadow_active = active;
+		post_big_small_task_count_change(cpu_online_mask);
+		put_online_cpus();
+	}
+}
+// TheCrazyLex@PA Introduce Shadow scheduling extension - end
+
 int sched_boost_handler(struct ctl_table *table, int write,
 		void __user *buffer, size_t *lenp,
 		loff_t *ppos)
@@ -1676,24 +1726,23 @@ done:
 
 static int task_load_will_fit(struct task_struct *p, u64 task_load, int cpu)
 {
-	struct rq *prev_rq = cpu_rq(task_cpu(p));
-	struct rq *rq = cpu_rq(cpu);
+	int prev_cpu = task_cpu(p);
 	int upmigrate, nice;
 
-	if (rq->capacity == max_capacity)
+	if (cpu_capacity(cpu) == max_capacity)
 		return 1;
 
 	if (sched_boost()) {
-		if (rq->capacity > prev_rq->capacity)
+		if (cpu_capacity(cpu) > cpu_capacity(prev_cpu))
 			return 1;
 	} else {
 		nice = TASK_NICE(p);
 		if (nice > sched_upmigrate_min_nice || upmigrate_discouraged(p))
 			return 1;
 
-		upmigrate = sched_upmigrate;
-		if (prev_rq->capacity > rq->capacity)
-			upmigrate = sched_downmigrate;
+		upmigrate = get_shadow_based_sched_upmigrate();
+		if (cpu_capacity(prev_cpu) > cpu_capacity(cpu))
+			upmigrate = get_shadow_based_sched_downmigrate();
 
 		if (task_load < upmigrate)
 			return 1;
@@ -1718,7 +1767,7 @@ static int eligible_cpu(u64 task_load, u64 cpu_load, int cpu, int sync)
 	if (mostly_idle_cpu_sync(cpu, cpu_load, sync))
 		return 1;
 
-	if (rq->max_possible_capacity != max_possible_capacity)
+	if (cpu_max_possible_capacity(cpu) != max_possible_capacity)
 		return !spill_threshold_crossed(task_load, cpu_load, rq);
 
 	return 0;
@@ -1755,7 +1804,8 @@ unsigned int power_cost_at_freq(int cpu, unsigned int freq)
 		 * capacity as a rough stand-in for real CPU power
 		 * numbers, assuming bigger CPUs are more power
 		 * hungry. */
-		return cpu_rq(cpu)->max_possible_capacity;
+		return cpu_efficiency(cpu) *
+				(cpu_max_possible_freq(cpu) / 1024);
 
 	if (!freq)
 		freq = min_max_freq;
@@ -1774,23 +1824,23 @@ unsigned int power_cost_at_freq(int cpu, unsigned int freq)
 /* Return the cost of running task p on CPU cpu. This function
  * currently assumes that task p is the only task which will run on
  * the CPU. */
-static unsigned int power_cost(u64 task_load, int cpu)
+unsigned int power_cost(u64 task_load, int cpu)
 {
 	unsigned int task_freq, cur_freq;
-	struct rq *rq = cpu_rq(cpu);
 	u64 demand;
 
 	if (!sysctl_sched_enable_power_aware)
-		return rq->max_possible_capacity;
+		return cpu_efficiency(cpu) *
+				(cpu_max_possible_freq(cpu) / 1024);
 
 	/* calculate % of max freq needed */
 	demand = task_load * 100;
 	demand = div64_u64(demand, max_task_load());
 
-	task_freq = demand * rq->max_possible_freq;
+	task_freq = demand * cpu_max_possible_freq(cpu);
 	task_freq /= 100; /* khz needed */
 
-	cur_freq = rq->cur_freq;
+	cur_freq = cpu_cur_freq(cpu);
 	task_freq = max(cur_freq, task_freq);
 
 	return power_cost_at_freq(cpu, task_freq);
@@ -1830,7 +1880,7 @@ static int best_small_task_cpu(struct task_struct *p, int sync)
 						i), i),
 				     cpu_temp(i));
 
-		if (rq->max_possible_capacity == max_possible_capacity &&
+		if (cpu_max_possible_capacity(i) == max_possible_capacity &&
 		    hmp_capable) {
 			cpumask_and(&fb_search_cpu, &search_cpu,
 				    &rq->freq_domain_cpumask);
@@ -1904,7 +1954,7 @@ static int best_small_task_cpu(struct task_struct *p, int sync)
 #define EA_MIGRATION		3
 #define IRQLOAD_MIGRATION	4
 
-static int skip_freq_domain(struct rq *task_rq, struct rq *rq, int reason)
+static int skip_freq_domain(int tcpu, int cpu, int reason)
 {
 	int skip;
 
@@ -1913,15 +1963,15 @@ static int skip_freq_domain(struct rq *task_rq, struct rq *rq, int reason)
 
 	switch (reason) {
 	case UP_MIGRATION:
-		skip = rq->capacity <= task_rq->capacity;
+		skip = cpu_capacity(cpu) <= cpu_capacity(tcpu);
 		break;
 
 	case DOWN_MIGRATION:
-		skip = rq->capacity >= task_rq->capacity;
+		skip = cpu_capacity(cpu) >= cpu_capacity(tcpu);
 		break;
 
 	case EA_MIGRATION:
-		skip = rq->capacity != task_rq->capacity;
+		skip = cpu_capacity(cpu) != cpu_capacity(tcpu);
 		break;
 
 	case IRQLOAD_MIGRATION:
@@ -1973,11 +2023,11 @@ static int select_packing_target(struct task_struct *p, int best_cpu)
 	int min_cost = INT_MAX;
 	int target = best_cpu;
 
-	if (rq->cur_freq >= rq->mostly_idle_freq)
+	if (cpu_cur_freq(best_cpu) >= cpu_mostly_idle_freq(best_cpu))
 		return best_cpu;
 
 	/* Don't pack if current freq is low because of throttling */
-	if (rq->max_freq <= rq->mostly_idle_freq)
+	if (cpu_max_freq(best_cpu) <= cpu_mostly_idle_freq(best_cpu))
 		return best_cpu;
 
 	cpumask_and(&search_cpus, tsk_cpus_allowed(p), cpu_online_mask);
@@ -2072,7 +2122,7 @@ static int select_best_cpu(struct task_struct *p, int target, int reason,
 						i), i),
 				     cpu_temp(i));
 
-		if (skip_freq_domain(trq, rq, reason)) {
+		if (skip_freq_domain(task_cpu(p), i, reason)) {
 			cpumask_andnot(&search_cpus, &search_cpus,
 						&rq->freq_domain_cpumask);
 			continue;
@@ -2219,7 +2269,7 @@ done:
 			best_cpu = fallback_idle_cpu;
 	}
 
-	if (cpu_rq(best_cpu)->mostly_idle_freq && !prefer_idle_override)
+	if (cpu_mostly_idle_freq(best_cpu) && !prefer_idle_override)
 		best_cpu = select_packing_target(p, best_cpu);
 
 	/*
@@ -2328,7 +2378,7 @@ unsigned int nr_eligible_big_tasks(int cpu)
 	int nr = rq->nr_running;
 	int nr_small = rq->hmp_stats.nr_small_tasks;
 
-	if (rq->max_possible_capacity != max_possible_capacity)
+	if (cpu_max_possible_capacity(cpu) != max_possible_capacity)
 		return nr_big;
 
 	/* Consider all (except small) tasks on max_capacity cpu as big tasks */
@@ -2588,6 +2638,7 @@ int sched_hmp_proc_update_handler(struct ctl_table *table, int write,
 	unsigned int old_val;
 	unsigned int *data = (unsigned int *)table->data;
 	int update_min_nice = 0;
+	bool force_reclassify = false;
 
 	mutex_lock(&policy_mutex);
 
@@ -2600,6 +2651,23 @@ int sched_hmp_proc_update_handler(struct ctl_table *table, int write,
 
 	if (write && (old_val == *data))
 		goto done;
+
+	// TheCrazyLex@PA Introduce Shadow scheduling extension - start
+	if (data == (unsigned int *)&sysctl_sched_use_shadow_scheduling) {
+		if (sysctl_sched_use_shadow_scheduling > 0) {
+			sched_use_shadow_scheduling = true;
+			/* Avoid values bigger than one to show up
+			   in the sysfs node */
+			sysctl_sched_use_shadow_scheduling = 1;
+		} else {
+			/* Also handle the case of shadow being active
+			   in this moment */
+			sched_set_shadow_active(false);
+			sched_use_shadow_scheduling = false;
+		}
+		goto done;
+	}
+	// TheCrazyLex@PA Introduce Shadow scheduling extension - end
 
 	if (data == &sysctl_sched_min_runtime) {
 		sched_min_runtime = ((u64) sysctl_sched_min_runtime) * 1000;
@@ -2615,12 +2683,43 @@ int sched_hmp_proc_update_handler(struct ctl_table *table, int write,
 		update_min_nice = 1;
 	} else {
 		/* all tunables other than min_nice are in percentage */
-		if (sysctl_sched_downmigrate_pct >
-		    sysctl_sched_upmigrate_pct || *data > 100) {
+		if ((sysctl_sched_downmigrate_pct >
+		    sysctl_sched_upmigrate_pct)
+		     || (sysctl_sched_shadow_downmigrate_pct >
+			sysctl_sched_shadow_upmigrate_pct)
+		     || *data > 100) {
 			*data = old_val;
 			ret = -EINVAL;
 			goto done;
 		}
+	}
+
+	// TheCrazyLex@PA Introduce Shadow scheduling extension - start
+	/* Evaluate whether we need to force a reclassification
+	   of tasks based on sched_shadow_active */
+
+	/* If sched_upmigrate_min_nice changed we need a
+	   reclassification regardless of shadow. */
+	if (update_min_nice)
+		force_reclassify = true;
+
+	/* If sched_small_task changed we need a
+	   reclassification regardless of shadow. */
+	if (data == &sysctl_sched_small_task_pct)
+		force_reclassify = true;
+
+	/* If shadow is active only force a reclassification
+	   for shadow values and if shadow is inactive only
+	   force a reclassification for non-shadow values.
+	   This is safe since the handler of shadow activity
+	   takes care of a possible reclassification when shadow
+	   activity changes. */
+	if (sched_shadow_active) {
+		if (data == &sysctl_sched_shadow_upmigrate_pct)
+			force_reclassify = true;
+	} else {
+		if (data == &sysctl_sched_upmigrate_pct)
+			force_reclassify = true;
 	}
 
 	/*
@@ -2631,19 +2730,18 @@ int sched_hmp_proc_update_handler(struct ctl_table *table, int write,
 	 * includes taking runqueue lock of all online cpus and re-initiatizing
 	 * their big/small counter values based on changed criteria.
 	 */
-	if ((data == &sysctl_sched_upmigrate_pct ||
-	     data == &sysctl_sched_small_task_pct || update_min_nice)) {
+	if (force_reclassify) {
 		get_online_cpus();
 		pre_big_small_task_count_change(cpu_online_mask);
 	}
 
 	set_hmp_defaults();
 
-	if ((data == &sysctl_sched_upmigrate_pct ||
-	     data == &sysctl_sched_small_task_pct || update_min_nice)) {
+	if (force_reclassify) {
 		post_big_small_task_count_change(cpu_online_mask);
 		put_online_cpus();
 	}
+// TheCrazyLex@PA Introduce Shadow scheduling extension - end
 
 done:
 	mutex_unlock(&policy_mutex);
@@ -2673,7 +2771,6 @@ static inline int find_new_hmp_ilb(int call_cpu, int type)
 	int best_cpu = nr_cpu_ids;
 	struct sched_domain *sd;
 	int min_cost = INT_MAX, cost;
-	struct rq *src_rq = cpu_rq(call_cpu);
 	struct rq *dst_rq;
 
 	rcu_read_lock();
@@ -2683,7 +2780,7 @@ static inline int find_new_hmp_ilb(int call_cpu, int type)
 		for_each_cpu(i, sched_domain_span(sd)) {
 			dst_rq = cpu_rq(i);
 			if (!idle_cpu(i) || (type == NOHZ_KICK_RESTRICT
-				  && dst_rq->capacity > src_rq->capacity))
+				  && cpu_capacity(i) > cpu_capacity(call_cpu)))
 				continue;
 
 			cost = power_cost_at_freq(i, min_max_freq);
@@ -2754,6 +2851,7 @@ static inline int is_task_migration_throttled(struct task_struct *p);
 static inline int migration_needed(struct rq *rq, struct task_struct *p)
 {
 	int nice = TASK_NICE(p);
+	int cpu = cpu_of(rq);
 
 	if (!sched_enable_hmp || p->state != TASK_RUNNING)
 		return 0;
@@ -2763,7 +2861,7 @@ static inline int migration_needed(struct rq *rq, struct task_struct *p)
 		return 0;
 
 	if (sched_boost()) {
-		if (rq->capacity != max_capacity)
+		if (cpu_capacity(cpu) != max_capacity)
 			return UP_MIGRATION;
 
 		return 0;
@@ -2772,20 +2870,20 @@ static inline int migration_needed(struct rq *rq, struct task_struct *p)
 	if (is_small_task(p))
 		return 0;
 
-	if (sched_cpu_high_irqload(cpu_of(rq)))
+	if (sched_cpu_high_irqload(cpu))
 		return IRQLOAD_MIGRATION;
 
 	if ((nice > sched_upmigrate_min_nice || upmigrate_discouraged(p)) &&
-			 rq->capacity > min_capacity)
+			 cpu_capacity(cpu_of(rq)) > min_capacity)
 		return DOWN_MIGRATION;
 
-	if (!task_will_fit(p, cpu_of(rq)))
+	if (!task_will_fit(p, cpu))
 		return UP_MIGRATION;
 
 	if (sysctl_sched_enable_power_aware &&
 	    !is_task_migration_throttled(p) &&
-	    is_cpu_throttling_imminent(cpu_of(rq)) &&
-	    lower_power_cpu_available(p, cpu_of(rq)))
+	    is_cpu_throttling_imminent(cpu) &&
+	    lower_power_cpu_available(p, cpu))
 		return EA_MIGRATION;
 
 	return 0;
@@ -2864,7 +2962,7 @@ static inline int is_cpu_throttling_imminent(int cpu)
 
 static inline int is_task_migration_throttled(struct task_struct *p)
 {
-	u64 delta = sched_clock() - p->run_start;
+	u64 delta = sched_ktime_clock() - p->run_start;
 
 	return delta < sched_min_runtime;
 }
@@ -2896,11 +2994,6 @@ static inline int select_best_cpu(struct task_struct *p, int target,
 static inline int find_new_hmp_ilb(int call_cpu, int type)
 {
 	return 0;
-}
-
-static inline int power_cost(u64 task_load, int cpu)
-{
-	return SCHED_POWER_SCALE;
 }
 
 static inline int
@@ -2971,7 +3064,7 @@ void init_new_task_load(struct task_struct *p)
 	u32 init_load_pelt = sched_init_task_load_pelt;
 	u32 init_load_pct = current->init_load_pct;
 
-	/* Note: child's init_load_pct itself would be 0 */
+	p->init_load_pct = 0;
 	memset(&p->ravg, 0, sizeof(struct ravg));
 	p->se.avg.decay_count	= 0;
 
@@ -3453,22 +3546,18 @@ unsigned int pct_task_load(struct task_struct *p)
 static inline void
 add_to_scaled_stat(int cpu, struct sched_avg *sa, u64 delta)
 {
-	struct rq *rq = cpu_rq(cpu);
-	int cur_freq = rq->cur_freq, max_freq = rq->max_freq;
-	int cpu_max_possible_freq = rq->max_possible_freq;
+	int cur_freq = cpu_cur_freq(cpu);
 	u64 scaled_delta;
 	int sf;
 
 	if (!sched_enable_hmp)
 		return;
 
-	if (unlikely(cur_freq > max_possible_freq ||
-		     (cur_freq == max_freq &&
-		      max_freq < cpu_max_possible_freq)))
+	if (unlikely(cur_freq > max_possible_freq))
 		cur_freq = max_possible_freq;
 
 	scaled_delta = div64_u64(delta * cur_freq, max_possible_freq);
-	sf = (rq->efficiency * 1024) / max_possible_efficiency;
+	sf = (cpu_efficiency(cpu) * 1024) / max_possible_efficiency;
 	scaled_delta *= sf;
 	scaled_delta >>= 10;
 	sa->runnable_avg_sum_scaled += scaled_delta;
@@ -5977,9 +6066,8 @@ int can_migrate_task(struct task_struct *p, struct lb_env *env)
 	if (throttled_lb_pair(task_group(p), env->src_cpu, env->dst_cpu))
 		return 0;
 
-	if (nr_big_tasks(env->src_rq) &&
-			capacity(env->dst_rq) > capacity(env->src_rq) &&
-			!is_big_task(p))
+	if (cpu_capacity(env->dst_cpu) > cpu_capacity(env->src_cpu) &&
+		nr_big_tasks(env->src_rq) && !is_big_task(p))
 		return 0;
 
 	if (env->flags & LBF_IGNORE_SMALL_TASKS && is_small_task(p))
@@ -6112,9 +6200,9 @@ static int move_tasks(struct lb_env *env)
 	if (env->imbalance <= 0)
 		return 0;
 
-	if (capacity(env->dst_rq) > capacity(env->src_rq))
+	if (cpu_capacity(env->dst_cpu) > cpu_capacity(env->src_cpu))
 		env->flags |= LBF_IGNORE_SMALL_TASKS;
-	else if (capacity(env->dst_rq) < capacity(env->src_rq) &&
+	else if (cpu_capacity(env->dst_cpu) < cpu_capacity(env->src_cpu) &&
 							!sched_boost())
 		env->flags |= LBF_IGNORE_BIG_TASKS;
 
@@ -6372,9 +6460,12 @@ struct sg_lb_stats {
 static int
 bail_inter_cluster_balance(struct lb_env *env, struct sd_lb_stats *sds)
 {
-	int nr_cpus;
+	int nr_cpus, local_cpu, busiest_cpu;
 
-	if (group_rq_capacity(sds->this) <= group_rq_capacity(sds->busiest))
+	local_cpu = group_first_cpu(sds->this);
+	busiest_cpu = group_first_cpu(sds->busiest);
+
+	if (cpu_capacity(local_cpu) <= cpu_capacity(busiest_cpu))
 		return 0;
 
 	if (sds->busiest_nr_big_tasks)
@@ -6707,7 +6798,7 @@ static bool update_sd_pick_busiest_active_balance(struct lb_env *env,
 						  struct sg_lb_stats *sgs)
 {
 	if (env->idle != CPU_NOT_IDLE &&
-	    capacity(env->dst_rq) > group_rq_capacity(sg)) {
+	    cpu_capacity(env->dst_cpu) > group_rq_capacity(sg)) {
 		if (sched_boost() && !sds->busiest && sgs->sum_nr_running) {
 			env->flags |= LBF_SCHED_BOOST_ACTIVE_BALANCE;
 			return true;
@@ -6773,7 +6864,7 @@ static bool update_sd_pick_busiest(struct lb_env *env,
 	cpu = group_first_cpu(sg);
 	if (sysctl_sched_enable_power_aware &&
 	    (!sds->busiest || (env->flags & LBF_EA_ACTIVE_BALANCE)) &&
-	    (capacity(env->dst_rq) == group_rq_capacity(sg)) &&
+	    (cpu_capacity(env->dst_cpu) == cpu_capacity(cpu)) &&
 	    sgs->sum_nr_running && (env->idle != CPU_NOT_IDLE) &&
 	    !is_task_migration_throttled(cpu_rq(cpu)->curr) &&
 	    is_cpu_throttling_imminent(cpu)) {
@@ -8086,10 +8177,11 @@ end:
 static inline int _nohz_kick_needed_hmp(struct rq *rq, int cpu, int *type)
 {
 	struct sched_domain *sd;
-	int i;
+	int i, rcpu = cpu_of(rq);
 
-	if (rq->mostly_idle_freq && rq->cur_freq < rq->mostly_idle_freq
-		 && rq->max_freq > rq->mostly_idle_freq)
+	if (cpu_mostly_idle_freq(rcpu) &&
+		cpu_cur_freq(rcpu) < cpu_mostly_idle_freq(rcpu)
+		 && cpu_max_freq(rcpu) > cpu_mostly_idle_freq(rcpu))
 			return 0;
 
 	if (rq->nr_running >= 2 &&
@@ -8097,7 +8189,7 @@ static inline int _nohz_kick_needed_hmp(struct rq *rq, int cpu, int *type)
 		rq->nr_running > rq->mostly_idle_nr_run ||
 		cpu_load(cpu) > rq->mostly_idle_load)) {
 
-		if (rq->capacity == max_capacity)
+		if (cpu_capacity(cpu_of(rq) == max_capacity))
 			return 1;
 
 		rcu_read_lock();

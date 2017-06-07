@@ -359,7 +359,6 @@ struct kgsl_device {
 
 	wait_queue_head_t wait_queue;
 	wait_queue_head_t active_cnt_wq;
-	struct workqueue_struct *work_queue;
 	struct platform_device *pdev;
 	struct dentry *d_debugfs;
 	struct idr context_idr;
@@ -652,18 +651,6 @@ static inline struct kgsl_device *kgsl_device_from_dev(struct device *dev)
 	}
 
 	return NULL;
-}
-
-static inline int kgsl_create_device_workqueue(struct kgsl_device *device)
-{
-	device->work_queue = create_singlethread_workqueue(device->name);
-	if (!device->work_queue) {
-		KGSL_DRV_ERR(device,
-			     "create_singlethread_workqueue(%s) failed\n",
-			     device->name);
-		return -EINVAL;
-	}
-	return 0;
 }
 
 static inline int kgsl_state_is_awake(struct kgsl_device *device)

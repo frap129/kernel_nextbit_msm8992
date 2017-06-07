@@ -318,12 +318,12 @@ do {									\
 #ifdef CONFIG_SCHED_HMP
 	P(mostly_idle_load);
 	P(mostly_idle_nr_run);
-	P(load_scale_factor);
-	P(capacity);
-	P(max_possible_capacity);
-	P(efficiency);
-	P(cur_freq);
-	P(max_freq);
+	P(cluster->load_scale_factor);
+	P(cluster->capacity);
+	P(cluster->max_possible_capacity);
+	P(cluster->efficiency);
+	P(cluster->cur_freq);
+	P(cluster->max_freq);
 #endif
 #ifdef CONFIG_SCHED_HMP
 	P(hmp_stats.nr_big_tasks);
@@ -415,6 +415,11 @@ static void sched_debug_header(struct seq_file *m)
 	P(sched_small_task);
 	P(sched_upmigrate);
 	P(sched_downmigrate);
+	// TheCrazyLex@PA Introduce Shadow scheduling extension - start
+	P(sysctl_sched_use_shadow_scheduling);
+	P(sched_shadow_upmigrate);
+	P(sched_shadow_downmigrate);
+	// TheCrazyLex@PA Introduce Shadow scheduling extension - end
 	P(sched_init_task_load_windows);
 	P(sched_init_task_load_pelt);
 	P(min_capacity);

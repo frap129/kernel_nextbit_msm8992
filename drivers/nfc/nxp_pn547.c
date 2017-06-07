@@ -540,7 +540,7 @@ static int pn547_probe(struct i2c_client *client,
 	spin_lock_init(&pn547_dev->irq_enabled_lock);
 
 	pn547_dev->pn547_device.minor = MISC_DYNAMIC_MINOR;
-	pn547_dev->pn547_device.name = "pn544";
+	pn547_dev->pn547_device.name = "pn547";
 	pn547_dev->pn547_device.fops = &pn547_dev_fops;
 
 	ret = misc_register(&pn547_dev->pn547_device);

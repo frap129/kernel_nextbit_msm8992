@@ -549,6 +549,11 @@ static s32 goodix_tool_read(struct file *file, char __user *user_buf,
 	}
 
 exit:
+	dataptr = cmd_head.data;
+	memset(&cmd_head, 0, sizeof(cmd_head));
+	cmd_head.wr = 0xFF;
+	cmd_head.data = dataptr;
+
 	mutex_unlock(&lock);
 	return ret;
 }
