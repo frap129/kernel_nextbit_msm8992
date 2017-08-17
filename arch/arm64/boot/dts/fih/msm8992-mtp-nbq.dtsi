@@ -303,16 +303,6 @@
 	};
 };
 
-&i2c_5 {
-	smb1357-charger@1c {
-		compatible = "qcom,smb1357-charger";
-		reg = <0x1c>;
-		qcom,parallel-charger;
-		qcom,float-voltage-mv = <4400>;
-		qcom,recharge-thresh-mv = <100>;
-	};
-};
-
 &soc {
 	gpio_keys {
 		compatible = "gpio-keys";
