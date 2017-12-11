@@ -148,7 +148,6 @@
 #define SIR_MAC_ACTION_WME            17
 #define SIR_MAC_ACTION_FST            18
 #define SIR_MAC_ACTION_VHT            21
-#define SIR_MAC_ACTION_MAX            256
 
 #define SIR_MAC_ACTION_TX             1
 #define SIR_MAC_ACTION_RX             2
@@ -643,6 +642,10 @@
 #define IS_WES_MODE_ENABLED(x) \
                     ((x)->roam.configParam.isWESModeEnabled)
 
+#define BA_RECIPIENT       1
+#define BA_INITIATOR       2
+#define BA_BOTH_DIRECTIONS 3
+
 /// Status Code (present in Management response frames) enum
 
 typedef enum eSirMacStatusCodes
@@ -802,6 +805,34 @@ typedef enum eSirMacReasonCodes
     eSIR_BEACON_MISSED                               = 65534, //We invented this to tell beacon missed case
 } tSirMacReasonCodes;
 
+
+// BA Initiator v/s Recipient
+typedef enum eBADirection
+{
+  eBA_RECIPIENT,
+  eBA_INITIATOR
+} tBADirection;
+
+// A-MPDU/BA Enable/Disable in Tx/Rx direction
+typedef enum eBAEnable
+{
+  eBA_DISABLE,
+  eBA_ENABLE
+} tBAEnable;
+
+// A-MPDU/BA Policy
+typedef enum eBAPolicy
+{
+  eBA_UNCOMPRESSED,
+  eBA_COMPRESSED
+} tBAPolicy;
+
+// A-MPDU/BA Policy
+typedef enum eBAPolicyType
+{
+  eBA_POLICY_DELAYED,
+  eBA_POLICY_IMMEDIATE
+} tBAPolicyType;
 
 /// Frame control field format (2 bytes)
 typedef  __ani_attr_pre_packed struct sSirMacFrameCtl

@@ -117,12 +117,9 @@ const char *tdls_action_frame_type[] = {"TDLS Setup Request",
 
 extern struct net_device_ops net_ops_struct;
 
-static bool wlan_hdd_is_type_p2p_action( const u8 *buf, uint32_t len)
+static bool wlan_hdd_is_type_p2p_action( const u8 *buf )
 {
     const u8 *ouiPtr;
-
-    if (len < WLAN_HDD_PUBLIC_ACTION_FRAME_SUB_TYPE_OFFSET + 1)
-        return FALSE;
 
     if ( buf[WLAN_HDD_PUBLIC_ACTION_FRAME_CATEGORY_OFFSET] !=
                WLAN_HDD_PUBLIC_ACTION_FRAME ) {
@@ -148,11 +145,11 @@ static bool wlan_hdd_is_type_p2p_action( const u8 *buf, uint32_t len)
     return TRUE;
 }
 
-static bool hdd_p2p_is_action_type_rsp( const u8 *buf, uint32_t len )
+static bool hdd_p2p_is_action_type_rsp( const u8 *buf )
 {
     tActionFrmType actionFrmType;
 
-    if ( wlan_hdd_is_type_p2p_action(buf, len) )
+    if ( wlan_hdd_is_type_p2p_action(buf) )
     {
         actionFrmType = buf[WLAN_HDD_PUBLIC_ACTION_FRAME_SUB_TYPE_OFFSET];
         if ( actionFrmType != WLAN_HDD_INVITATION_REQ &&
@@ -1373,25 +1370,16 @@ int __wlan_hdd_mgmt_tx(struct wiphy *wiphy, struct net_device *dev,
     hdd_remain_on_chan_ctx_t *pRemainChanCtx;
     hdd_context_t *pHddCtx = WLAN_HDD_GET_CTX( pAdapter );
     tANI_U16 extendedWait = 0;
-    tANI_U8 type;
-    tANI_U8 subType;
+    tANI_U8 type = WLAN_HDD_GET_TYPE_FRM_FC(buf[0]);
+    tANI_U8 subType = WLAN_HDD_GET_SUBTYPE_FRM_FC(buf[0]);
     tActionFrmType actionFrmType;
     bool noack = 0;
     int status;
     unsigned long rc;
     hdd_adapter_t *goAdapter;
     uint8_t home_ch = 0;
-    uint32_t mgmt_hdr_len = sizeof(struct ieee80211_hdr_3addr);
 
     ENTER();
-
-    if (len < mgmt_hdr_len + 1) {
-        hddLog(LOGE, FL("Invalid Length"));
-        return -EINVAL;
-    }
-
-    type = WLAN_HDD_GET_TYPE_FRM_FC(buf[0]);
-    subType = WLAN_HDD_GET_SUBTYPE_FRM_FC(buf[0]);
 
     hddLog(LOG1, FL("wait: %d, offchan: %d"), wait, offchan);
     MTRACE(vos_trace(VOS_MODULE_ID_HDD,
@@ -1410,20 +1398,16 @@ int __wlan_hdd_mgmt_tx(struct wiphy *wiphy, struct net_device *dev,
            hdd_device_mode_to_string(pAdapter->device_mode),
            pAdapter->device_mode, type);
 
-    if (type == SIR_MAC_MGMT_FRAME && subType == SIR_MAC_MGMT_ACTION &&
-        len > IEEE80211_MIN_ACTION_SIZE)
-        hddLog(LOG1, FL("category: %d, actionID: %d"),
-               buf[WLAN_HDD_PUBLIC_ACTION_FRAME_BODY_OFFSET +
+    hddLog(LOG1, FL("category: %d, actionID: %d"),
+           buf[WLAN_HDD_PUBLIC_ACTION_FRAME_BODY_OFFSET +
                WLAN_HDD_PUBLIC_ACTION_FRAME_CATEGORY_OFFSET],
-               buf[WLAN_HDD_PUBLIC_ACTION_FRAME_BODY_OFFSET +
+           buf[WLAN_HDD_PUBLIC_ACTION_FRAME_BODY_OFFSET +
                WLAN_HDD_PUBLIC_ACTION_FRAME_ACTION_OFFSET]);
 
 #ifdef WLAN_FEATURE_P2P_DEBUG
     if ((type == SIR_MAC_MGMT_FRAME) &&
             (subType == SIR_MAC_MGMT_ACTION) &&
-            wlan_hdd_is_type_p2p_action(
-             &buf[WLAN_HDD_PUBLIC_ACTION_FRAME_BODY_OFFSET],
-             len - mgmt_hdr_len))
+            wlan_hdd_is_type_p2p_action(&buf[WLAN_HDD_PUBLIC_ACTION_FRAME_BODY_OFFSET]))
     {
         actionFrmType = buf[WLAN_HDD_PUBLIC_ACTION_FRAME_TYPE_OFFSET];
         if(actionFrmType >= MAX_P2P_ACTION_FRAME_TYPE)
@@ -1576,39 +1560,13 @@ int __wlan_hdd_mgmt_tx(struct wiphy *wiphy, struct net_device *dev,
         pRemainChanCtx = cfgState->remain_on_chan_ctx;
         if ((type == SIR_MAC_MGMT_FRAME) &&
               (subType == SIR_MAC_MGMT_ACTION) &&
-               hdd_p2p_is_action_type_rsp(
-                &buf[WLAN_HDD_PUBLIC_ACTION_FRAME_BODY_OFFSET],
-                len - mgmt_hdr_len) &&
+               hdd_p2p_is_action_type_rsp(&buf[WLAN_HDD_PUBLIC_ACTION_FRAME_BODY_OFFSET]) &&
                cfgState->remain_on_chan_ctx &&
                cfgState->current_freq == chan->center_freq )
          {
                if(VOS_TIMER_STATE_RUNNING == vos_timer_getCurrentState(
                    &cfgState->remain_on_chan_ctx->hdd_remain_on_chan_timer))
                {
-                   /* In the latest wpa_supplicant, the wait time for go
-                    * negotiation response is set to 100msec, due to which,
-                    * there could be a possibility that, if the go negotaition
-                    * confirmation frame is not received within 100 msec, ROC
-                    * would be timeout and resulting in connection failures as
-                    * the device will not be on the listen channel anymore to
-                    * receive the confirmation frame.
-                    * Also wpa_supplicant has set the wait to 50msec for go
-                    * negotiation confirmation, invitation response and
-                    * provisional discovery response frames. So increase the
-                    * wait time for all these frames.
-                    */
-                   actionFrmType =
-                          buf[WLAN_HDD_PUBLIC_ACTION_FRAME_TYPE_OFFSET];
-                   if ( actionFrmType == WLAN_HDD_GO_NEG_RESP ||
-                           actionFrmType == WLAN_HDD_PROV_DIS_RESP)
-                       wait = wait + ACTION_FRAME_RSP_WAIT;
-                   else if ( actionFrmType == WLAN_HDD_GO_NEG_CNF ||
-                           actionFrmType == WLAN_HDD_INVITATION_RESP )
-                       wait = wait + ACTION_FRAME_ACK_WAIT;
-
-                   hddLog( LOG1, "%s: Extending the wait time %d for actionFrmType=%d",
-                           __func__,wait,actionFrmType);
-
                    vos_timer_stop(&cfgState->remain_on_chan_ctx->hdd_remain_on_chan_timer);
                    status = vos_timer_start(&cfgState->remain_on_chan_ctx->hdd_remain_on_chan_timer,
                                                         wait);
@@ -1644,18 +1602,17 @@ int __wlan_hdd_mgmt_tx(struct wiphy *wiphy, struct net_device *dev,
          } else
              mutex_unlock(&cfgState->remain_on_chan_ctx_lock);
 
-        mutex_lock(&cfgState->remain_on_chan_ctx_lock);
         if((cfgState->remain_on_chan_ctx != NULL) &&
            (cfgState->current_freq == chan->center_freq)
           )
         {
-            mutex_unlock(&cfgState->remain_on_chan_ctx_lock);
             hddLog(LOG1,"action frame: extending the wait time");
             extendedWait = (tANI_U16)wait;
             goto send_frame;
         }
-        mutex_unlock(&cfgState->remain_on_chan_ctx_lock);
+
         INIT_COMPLETION(pAdapter->offchannel_tx_event);
+
         status = wlan_hdd_request_remain_on_channel(wiphy, dev,
                                         chan,
 #if (LINUX_VERSION_CODE < KERNEL_VERSION(3,8,0)) && !defined(WITH_BACKPORTS)
@@ -1732,9 +1689,7 @@ int __wlan_hdd_mgmt_tx(struct wiphy *wiphy, struct net_device *dev,
 
         if ((type == SIR_MAC_MGMT_FRAME) &&
                 (subType == SIR_MAC_MGMT_ACTION) &&
-                wlan_hdd_is_type_p2p_action(
-                 &buf[WLAN_HDD_PUBLIC_ACTION_FRAME_BODY_OFFSET],
-                 len - mgmt_hdr_len))
+                (buf[WLAN_HDD_PUBLIC_ACTION_FRAME_OFFSET] == WLAN_HDD_PUBLIC_ACTION_FRAME))
         {
             actionFrmType = buf[WLAN_HDD_PUBLIC_ACTION_FRAME_TYPE_OFFSET];
             hddLog(LOG1, "Tx Action Frame %u", actionFrmType);
@@ -1910,25 +1865,11 @@ void hdd_sendActionCnf( hdd_adapter_t *pAdapter, tANI_BOOLEAN actionSendSuccess 
 
     cfgState->actionFrmState = HDD_IDLE;
 
+    hddLog( LOG1, "Send Action cnf, actionSendSuccess %d", actionSendSuccess);
     if( NULL == cfgState->buf )
     {
         return;
     }
-    if (cfgState->is_go_neg_ack_received) {
-
-        cfgState->is_go_neg_ack_received = 0 ;
-        /* Sometimes its possible that host may receive the ack for GO
-         * negotiation req after sending go negotaition confirmation,
-         * in such case drop the ack received for the go negotiation
-         * request, so that supplicant waits for the confirmation ack
-         * from firmware.
-         */
-        hddLog( LOG1, FL("Drop the pending ack received in cfgState->actionFrmState %d"),
-                cfgState->actionFrmState);
-        return;
-    }
-
-    hddLog( LOG1, "Send Action cnf, actionSendSuccess %d", actionSendSuccess);
 
     /*
      * buf is the same pointer it passed us to send. Since we are sending
@@ -1948,48 +1889,6 @@ void hdd_sendActionCnf( hdd_adapter_t *pAdapter, tANI_BOOLEAN actionSendSuccess 
     cfgState->buf = NULL;
 
     complete(&pAdapter->tx_action_cnf_event);
-}
-
-/**
- * hdd_send_action_cnf_cb - action confirmation callback
- * @session_id: SME session ID
- * @tx_completed: ack status
- *
- * This function invokes hdd_sendActionCnf to update ack status to
- * supplicant.
- */
-void hdd_send_action_cnf_cb(uint32_t session_id, bool tx_completed)
-{
-	v_CONTEXT_t vos_context;
-	hdd_context_t *hdd_ctx;
-	hdd_adapter_t *adapter;
-
-	ENTER();
-
-	/* Get the global VOSS context */
-	vos_context = vos_get_global_context(VOS_MODULE_ID_SYS, NULL);
-	if (!vos_context) {
-		hddLog(LOGE, FL("Global VOS context is Null"));
-		return;
-	}
-
-	/* Get the HDD context.*/
-	hdd_ctx = vos_get_context(VOS_MODULE_ID_HDD, vos_context);
-	if (0 != wlan_hdd_validate_context(hdd_ctx))
-		return;
-
-	adapter = hdd_get_adapter_by_sme_session_id(hdd_ctx, session_id);
-	if (NULL == adapter) {
-		hddLog(LOGE, FL("adapter not found"));
-		return;
-	}
-
-	if (WLAN_HDD_ADAPTER_MAGIC != adapter->magic) {
-		hddLog(LOGE, FL("adapter has invalid magic"));
-		return;
-	}
-
-	hdd_sendActionCnf(adapter, tx_completed) ;
 }
 
 /**
@@ -2060,8 +1959,7 @@ int hdd_setP2pNoa( struct net_device *dev, tANI_U8 *command )
         NoA.single_noa_duration = 0;
         NoA.psSelection = P2P_POWER_SAVE_TYPE_PERIODIC_NOA;
     }
-    /* NOA interval in TU */
-    NoA.interval = NOA_INTERVAL_IN_TU;
+    NoA.interval = MS_TO_MUS(100);
     NoA.count = count;
     NoA.sessionid = pAdapter->sessionId;
 
@@ -2255,11 +2153,20 @@ static tANI_U8 wlan_hdd_get_session_type( enum nl80211_iftype type )
     return sessionType;
 }
 
+#if (LINUX_VERSION_CODE >= KERNEL_VERSION(3,7,0)) || defined(WITH_BACKPORTS)
 struct wireless_dev* __wlan_hdd_add_virtual_intf(
                   struct wiphy *wiphy, const char *name,
-                  unsigned char name_assign_type,
                   enum nl80211_iftype type,
                   u32 *flags, struct vif_params *params )
+#elif (LINUX_VERSION_CODE >= KERNEL_VERSION(3,6,0))
+struct wireless_dev* __wlan_hdd_add_virtual_intf(
+                  struct wiphy *wiphy, char *name, enum nl80211_iftype type,
+                  u32 *flags, struct vif_params *params )
+#else
+struct net_device* __wlan_hdd_add_virtual_intf(
+                  struct wiphy *wiphy, char *name, enum nl80211_iftype type,
+                  u32 *flags, struct vif_params *params )
+#endif
 {
     hdd_context_t *pHddCtx = (hdd_context_t*) wiphy_priv(wiphy);
     hdd_adapter_t* pAdapter = NULL;
@@ -2321,19 +2228,12 @@ struct wireless_dev* __wlan_hdd_add_virtual_intf(
             pAdapter = hdd_open_adapter( pHddCtx,
                                          wlan_hdd_get_session_type(type),
                                          name, p2pDeviceAddress.bytes,
-                                         name_assign_type,
                                          VOS_TRUE );
-            if (WLAN_HDD_RX_HANDLE_RPS == pHddCtx->cfg_ini->rxhandle)
-                hdd_dp_util_send_rps_ind(pAdapter);
     }
     else
     {
        pAdapter = hdd_open_adapter( pHddCtx, wlan_hdd_get_session_type(type),
-                          name, wlan_hdd_get_intf_addr(pHddCtx),
-                          name_assign_type,
-                          VOS_TRUE);
-       if (WLAN_HDD_RX_HANDLE_RPS == pHddCtx->cfg_ini->rxhandle)
-           hdd_dp_util_send_rps_ind(pAdapter);
+                          name, wlan_hdd_get_intf_addr(pHddCtx), VOS_TRUE );
     }
 
     if( NULL == pAdapter)
@@ -2349,45 +2249,16 @@ struct wireless_dev* __wlan_hdd_add_virtual_intf(
 #endif
 }
 
-#if (LINUX_VERSION_CODE >= KERNEL_VERSION(4, 1, 0))
-/**
- * wlan_hdd_add_virtual_intf() - Add virtual interface wrapper
- * @wiphy: wiphy pointer
- * @name: User-visible name of the interface
- * @name_assign_type: the name of assign type of the netdev
- * @nl80211_iftype: (virtual) interface types
- * @flags: monitor mode configuration flags (not used)
- * @vif_params: virtual interface parameters (not used)
- *
- * Return: the pointer of wireless dev, otherwise NULL.
- */
-struct wireless_dev *wlan_hdd_add_virtual_intf(struct wiphy *wiphy,
-                                               const char *name,
-                                               unsigned char name_assign_type,
-                                               enum nl80211_iftype type,
-                                               u32 *flags,
-                                               struct vif_params *params)
-{
-    struct wireless_dev *wdev;
-
-    vos_ssr_protect(__func__);
-    wdev = __wlan_hdd_add_virtual_intf(wiphy, name, name_assign_type,
-                                       type, flags, params);
-    vos_ssr_unprotect(__func__);
-    return wdev;
-}
-#elif (LINUX_VERSION_CODE >= KERNEL_VERSION(3,7,0)) || defined(WITH_BACKPORTS)
+#if (LINUX_VERSION_CODE >= KERNEL_VERSION(3,7,0)) || defined(WITH_BACKPORTS)
 struct wireless_dev* wlan_hdd_add_virtual_intf(
                   struct wiphy *wiphy, const char *name,
                   enum nl80211_iftype type,
                   u32 *flags, struct vif_params *params )
 {
     struct wireless_dev* wdev;
-    unsigned char name_assign_type = 0;
 
     vos_ssr_protect(__func__);
-    wdev = __wlan_hdd_add_virtual_intf(wiphy, name, name_assign_type,
-                                       type, flags, params);
+    wdev = __wlan_hdd_add_virtual_intf(wiphy, name, type, flags, params);
     vos_ssr_unprotect(__func__);
     return wdev;
 }
@@ -2397,11 +2268,9 @@ struct wireless_dev* wlan_hdd_add_virtual_intf(
                   u32 *flags, struct vif_params *params )
 {
     struct wireless_dev* wdev;
-    unsigned char name_assign_type = 0;
 
     vos_ssr_protect(__func__);
-    wdev = __wlan_hdd_add_virtual_intf(wiphy, name, name_assign_type,
-                                       type, flags, params);
+    wdev = __wlan_hdd_add_virtual_intf(wiphy, name, type, flags, params);
     vos_ssr_unprotect(__func__);
     return wdev;
 }
@@ -2411,11 +2280,9 @@ struct net_device* wlan_hdd_add_virtual_intf(
                   u32 *flags, struct vif_params *params )
 {
     struct net_device* ndev;
-    unsigned char name_assign_type = 0;
 
     vos_ssr_protect(__func__);
-    ndev = __wlan_hdd_add_virtual_intf(wiphy, name, name_assign_type,
-                                       type, flags, params);
+    ndev = __wlan_hdd_add_virtual_intf(wiphy, name, type, flags, params);
     vos_ssr_unprotect(__func__);
     return ndev;
 }
@@ -2695,7 +2562,6 @@ void __hdd_indicate_mgmt_frame(hdd_adapter_t *pAdapter,
                 {
                     hddLog(LOG1, "%s: ACK_PENDING and But received RESP for Action frame ",
                             __func__);
-                    cfgState->is_go_neg_ack_received = 1;
                     hdd_sendActionCnf(pAdapter, TRUE);
                 }
             }

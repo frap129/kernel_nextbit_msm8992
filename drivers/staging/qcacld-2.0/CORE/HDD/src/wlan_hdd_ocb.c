@@ -492,9 +492,9 @@ static void hdd_ocb_set_config_callback(void *context_ptr, void *response_ptr)
 			 * Open the TX data path
 			 */
 			if (!hdd_ocb_register_sta(adapter)) {
-				wlan_hdd_netif_queue_control(adapter,
-					WLAN_START_ALL_NETIF_QUEUE_N_CARRIER,
-					WLAN_CONTROL_PATH);
+				netif_carrier_on(adapter->dev);
+				netif_tx_start_all_queues(
+				    adapter->dev);
 			}
 		}
 
@@ -531,8 +531,9 @@ static int hdd_ocb_set_config_req(hdd_adapter_t *adapter,
 	context.magic = HDD_OCB_MAGIC;
 
 	hddLog(LOG1, FL("Disabling queues"));
-	wlan_hdd_netif_queue_control(adapter, WLAN_NETIF_TX_DISABLE_N_CARRIER,
-				WLAN_CONTROL_PATH);
+	netif_tx_disable(adapter->dev);
+	netif_carrier_off(adapter->dev);
+
 	/* Call the SME API to set the config */
 	halStatus = sme_ocb_set_config(
 		((hdd_context_t *)adapter->pHddCtx)->hHal, &context,
@@ -949,18 +950,10 @@ static int __wlan_hdd_cfg80211_ocb_set_config(struct wiphy *wiphy,
 		tb[QCA_WLAN_VENDOR_ATTR_OCB_SET_CONFIG_SCHEDULE_SIZE]);
 
 	/* Get the ndl chan array and the ndl active state array. */
-	if (!tb[QCA_WLAN_VENDOR_ATTR_OCB_SET_CONFIG_NDL_CHANNEL_ARRAY]) {
-		hddLog(LOGE, FL("NDL_CHANNEL_ARRAY is not present"));
-		return -EINVAL;
-	}
 	ndl_chan_list =
 		tb[QCA_WLAN_VENDOR_ATTR_OCB_SET_CONFIG_NDL_CHANNEL_ARRAY];
 	ndl_chan_list_len = (ndl_chan_list ? nla_len(ndl_chan_list) : 0);
 
-	if (!tb[QCA_WLAN_VENDOR_ATTR_OCB_SET_CONFIG_NDL_ACTIVE_STATE_ARRAY]) {
-		hddLog(LOGE, FL("NDL_ACTIVE_STATE_ARRAY is not present"));
-		return -EINVAL;
-	}
 	ndl_active_state_list =
 		tb[QCA_WLAN_VENDOR_ATTR_OCB_SET_CONFIG_NDL_ACTIVE_STATE_ARRAY];
 	ndl_active_state_list_len = (ndl_active_state_list ?
@@ -994,10 +987,6 @@ static int __wlan_hdd_cfg80211_ocb_set_config(struct wiphy *wiphy,
 	config->def_tx_param_size = def_tx_param_size;
 
 	/* Read the channel array */
-	if (!tb[QCA_WLAN_VENDOR_ATTR_OCB_SET_CONFIG_CHANNEL_ARRAY]) {
-		hddLog(LOGE, FL("CHANNEL_ARRAY is not present"));
-		return -EINVAL;
-	}
 	channel_array = tb[QCA_WLAN_VENDOR_ATTR_OCB_SET_CONFIG_CHANNEL_ARRAY];
 	if (!channel_array) {
 		hddLog(LOGE, FL("No channel present"));
